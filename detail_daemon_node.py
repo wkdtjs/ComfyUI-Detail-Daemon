@@ -518,3 +518,165 @@ class LyingSigmaSamplerNode:
             ),
         )
 
+
+class DetailDaemonSamplerGraphNode:
+    """Detail Daemon Sampler with Graph Visualization - combines DetailDaemonSamplerNode and DetailDaemonGraphSigmasNode"""
+    DESCRIPTION = "This sampler wrapper works by adjusting the sigma passed to the model, while showing a visual graph of the adjustment schedule."
+    CATEGORY = "sampling/custom_sampling/samplers"
+    RETURN_TYPES = ("SAMPLER",)
+    OUTPUT_NODE = True
+    FUNCTION = "go"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict:
+        return {
+            "required": {
+                "sampler": ("SAMPLER",),
+                "sigmas": ("SIGMAS", {"forceInput": True}),
+                "detail_amount": (
+                    "FLOAT",
+                    {"default": 0.1, "min": -5.0, "max": 5.0, "step": 0.01},
+                ),
+                "start": (
+                    "FLOAT",
+                    {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "end": (
+                    "FLOAT",
+                    {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "bias": (
+                    "FLOAT",
+                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "exponent": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05},
+                ),
+                "start_offset": (
+                    "FLOAT",
+                    {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01},
+                ),
+                "end_offset": (
+                    "FLOAT",
+                    {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01},
+                ),
+                "fade": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05},
+                ),
+                "smooth": ("BOOLEAN", {"default": True}),
+                "cfg_scale_override": (
+                    "FLOAT",
+                    {
+                        "default": 0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.5,
+                        "round": 0.01,
+                        "tooltip": "If set to 0, the sampler will automatically determine the CFG scale (if possible). Set to some other value to override.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(
+        cls,
+        sampler: object,
+        sigmas: torch.Tensor,
+        *,
+        detail_amount,
+        start,
+        end,
+        bias,
+        exponent,
+        start_offset,
+        end_offset,
+        fade,
+        smooth,
+        cfg_scale_override,
+    ) -> tuple:
+        # Create the schedule for visualization
+        steps = len(sigmas) - 1
+        schedule = make_detail_daemon_schedule(
+            steps,
+            start,
+            end,
+            bias,
+            detail_amount,
+            exponent,
+            start_offset,
+            end_offset,
+            fade,
+            smooth,
+        )
+
+        # Create the graph image
+        image = cls.plot_schedule(schedule)
+        
+        # Save temp image
+        output_dir = folder_paths.get_temp_directory()
+        prefix_append = "_temp_" + ''.join(random.choice("abcdefghijklmnopqrstupvxyz") for x in range(5))
+        
+        full_output_folder, filename, counter, subfolder, _ = (
+            folder_paths.get_save_image_path(prefix_append, output_dir)
+        )
+        filename = f"{filename}_{counter:05}_.png"
+        file_path = os.path.join(full_output_folder, filename)
+        image.save(file_path, compress_level=1)
+
+        # Create the sampler function closure
+        def dds_make_schedule(steps):
+            return make_detail_daemon_schedule(
+                steps,
+                start,
+                end,
+                bias,
+                detail_amount,
+                exponent,
+                start_offset,
+                end_offset,
+                fade,
+                smooth,
+            )
+
+        # Return the sampler and UI output
+        return {
+            "ui": {
+                "images": [
+                    {"filename": filename, "subfolder": subfolder, "type": "temp"},
+                ],
+            },
+            "result": (
+                KSAMPLER(
+                    detail_daemon_sampler,
+                    extra_options={
+                        "dds_wrapped_sampler": sampler,
+                        "dds_make_schedule": dds_make_schedule,
+                        "dds_cfg_scale_override": cfg_scale_override,
+                    },
+                ),
+            ),
+        }
+
+    @staticmethod
+    def plot_schedule(schedule) -> Image:
+        plt.figure(figsize=(6, 4))
+        plt.plot(schedule, label="Sigma Adjustment Curve")
+        plt.xlabel("Steps")
+        plt.ylabel("Multiplier (*10)")
+        plt.title("Detail Adjustment Schedule")
+        plt.legend()
+        plt.grid(True)
+        plt.xticks(range(len(schedule)))
+        plt.ylim(-1, 1)
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="PNG")
+        plt.close()
+        buf.seek(0)
+        image = Image.open(buf)
+        return image
+
